@@ -23,6 +23,7 @@ int main(int argc, char** argv) {
     signal(SIGUSR2, signalHandler); //12
 
     while(1) {
+		//pause()
         printf("Esperando sinal...\n");
         usleep(1000000);
     }
