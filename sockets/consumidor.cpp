@@ -73,7 +73,6 @@ int main(int argc, char** argv) {
         return -1;
     }
     
-    cout << "Hello message sent\n";
     bool fim = false;
     //devo ler até receber um 0
     while(!fim) {
