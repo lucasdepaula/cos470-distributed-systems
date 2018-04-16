@@ -6,8 +6,8 @@
 #include <math.h>
 
 
-//#define n 10000000 //10^7
-#define n 100000000 //10^8
+#define n 10000000 //10^7
+//#define n 100000080//10^8
 //#define n 1000000000 //10^9
 
 
@@ -17,8 +17,8 @@ int8_t vetor[n];
 int somaTotal = 0;
 
 struct RANGE {
-  int init;
-  int final;
+  long init;
+  long final;
 };
 
 void acquire(std::atomic_flag *lock_stream){
@@ -46,7 +46,8 @@ DWORD WINAPI sumArray(LPVOID obj ) {
 	try {
         RANGE *range = (RANGE*)obj;
         int sum = 0 ;
-        for (int i = range->init; i < range->final ; i ++ ){
+        //cout << "index de inicio e fim do thread: " << range->init << " / " << range->final << endl;
+        for (long i = range->init; i < range->final ; i ++ ){
             sum += vetor[i];
         }
         acumularSomaRC(sum);
@@ -60,7 +61,7 @@ DWORD WINAPI sumArray(LPVOID obj ) {
 
 
 
-HANDLE startThread(int init, int final) {
+HANDLE startThread(long init, long final) {
 	DWORD threadIdentifier;
     RANGE *range = (RANGE*) malloc(sizeof(RANGE*));
 	range-> init = init;
@@ -76,33 +77,35 @@ HANDLE startThread(int init, int final) {
 
 
 int main(int argc, char* argv[]) {
-    int nThreads = atoi(argv[1]);
-    defineVetor();
-    long arraySize = ceil(n/ (double) nThreads);
-    cout <<  "Cada thread somara " << arraySize << " valores do array" << endl;
-    HANDLE threads[nThreads];
-    
-    int meanTime = 0;
-    for ( int k = 0 ; k < 10 ; k ++ ){
-        somaTotal = 0;
-        int initTime = clock();
+    //int nThreads = atoi(argv[1]);   
+    int arrayThreads[9] = {1,2,4,8,16,32,64,128,256};
+    defineVetor();      
+    for (int m = 0; m < sizeof(arrayThreads)/sizeof(int) ; m++ ){
+        int nThreads = arrayThreads[m];
 
-        for (int i = 0 ; i < nThreads ; i ++ ){
-            threads[i] = startThread(arraySize*i, std::min<long>(arraySize*i + arraySize, (long) n)); 
-        }
-
-        //cout << "Wait for single object " << endl;
-        for (int i = 0 ; i < nThreads ; i ++ ){
-            WaitForSingleObject(threads[i], INFINITE);  
-        }
-
-        int endTime = clock();
-        meanTime += endTime - initTime;
-        //cout << somaTotal<< endl;
-    }
+        int arraySize = ceil(n/ (double) nThreads);
+        HANDLE threads[nThreads];
         
-    meanTime = meanTime / 10;
+        int meanTime = 0;
+        for ( int k = 0 ; k < 10 ; k ++ ){
+            somaTotal = 0;
+            int initTime = clock();
 
-    cout << "Para K = " << nThreads << ", o tempo e de "  << (double) (meanTime)/CLOCKS_PER_SEC << " segundos." << endl;
+            for (int i = 0 ; i < nThreads ; i ++ ){
+                threads[i] = startThread((long)arraySize*i, (long) std::min<int>(arraySize*i + arraySize,  n)); 
+            }
+
+            for (int i = 0 ; i < nThreads ; i ++ ){
+                WaitForSingleObject(threads[i], INFINITE);  
+            }
+
+            int endTime = clock();
+            meanTime += endTime - initTime;
+        }
+            
+        meanTime = meanTime / 10;
+        cout << "Para K = " << nThreads << ", a soma resulta: " << somaTotal << " e o tempo e de "  << (double) (meanTime)/CLOCKS_PER_SEC << " segundos." << endl;
+    }
+    
 }
 
