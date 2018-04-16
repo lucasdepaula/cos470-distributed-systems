@@ -2,12 +2,18 @@
 #include <atomic>
 #include <windows.h>
 #include <tchar.h>
+#include <time.h>
+#include <math.h>
 
-#define n 1000000000
+
+//#define n 10000000 //10^7
+#define n 100000000 //10^8
+//#define n 1000000000 //10^9
+
 
 using namespace std;
 std::atomic_flag lock_stream = ATOMIC_FLAG_INIT;
-int vetor[n];
+int8_t vetor[n];
 int somaTotal = 0;
 
 struct RANGE {
@@ -69,26 +75,34 @@ HANDLE startThread(int init, int final) {
 }
 
 
-
 int main(int argc, char* argv[]) {
     int nThreads = atoi(argv[1]);
     defineVetor();
-    // cout << " vetor: ";
-    // for ( int i = 0 ; i < n ; i ++){
-    //     cout << " " << vetor[i] << " ";
-    // }
-    // cout << endl;
-    int arraySize = n/nThreads;
+    long arraySize = ceil(n/ (double) nThreads);
     cout <<  "Cada thread somara " << arraySize << " valores do array" << endl;
     HANDLE threads[nThreads];
-    for (int i = 0 ; i < nThreads ; i ++ ){
-    	threads[i] = startThread(arraySize*i, arraySize*i + arraySize);	
-	}
+    
+    int meanTime = 0;
+    for ( int k = 0 ; k < 10 ; k ++ ){
+        somaTotal = 0;
+        int initTime = clock();
 
-    for (int i = 0 ; i < nThreads ; i ++ ){
-    	WaitForSingleObject(threads[i], INFINITE);	
-	}
+        for (int i = 0 ; i < nThreads ; i ++ ){
+            threads[i] = startThread(arraySize*i, std::min<long>(arraySize*i + arraySize, (long) n)); 
+        }
 
-    cout << somaTotal << endl;
+        //cout << "Wait for single object " << endl;
+        for (int i = 0 ; i < nThreads ; i ++ ){
+            WaitForSingleObject(threads[i], INFINITE);  
+        }
+
+        int endTime = clock();
+        meanTime += endTime - initTime;
+        //cout << somaTotal<< endl;
+    }
+        
+    meanTime = meanTime / 10;
+
+    cout << "Para K = " << nThreads << ", o tempo e de "  << (double) (meanTime)/CLOCKS_PER_SEC << " segundos." << endl;
 }
 
