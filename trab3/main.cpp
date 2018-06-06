@@ -6,6 +6,21 @@
 
 using namespace std;
 
+pid_t *processos;
+int id;
+bool spawn(int n) { // cria n processos recursivamente.
+    if(n) {
+        if(fork()==0) {
+            id++;
+            if(n) {
+                spawn(n-1);
+            }
+            else
+                return true;
+        }
+    }
+}
+
 string gerar_frase(){
     string frases[] = {
         "Quando vires um homem bom, tenta imitá-lo; quando vires um homem mau, examina-te a ti mesmo.",
@@ -18,13 +33,14 @@ string gerar_frase(){
         "Há uma inocência na admiração: é a daquele a quem ainda não passou pela cabeça que também ele poderia um dia ser admirado.",
         "A alegria que se tem em pensar e aprender faz-nos pensar e aprender ainda mais."
     };
-    srand(time(NULL));
+    
     auto len = end(frases) - begin(frases);
     return frases[rand() % len];
 }
 
 int programa() {
-    cout << gerar_frase()<<endl;
+    srand(time(NULL) + id);
+    cout << "ID: " << id << " " << gerar_frase()<<endl;
     return 1;
 }
 
@@ -34,18 +50,13 @@ int main(int argc, char *argv[]) {
         cout << "Informe o número de processos que serão criados!" << endl;
         return 0;
     }
+    id=1;
     int len_proc = atoi(argv[1]);
-    pid_t *processos = new pid_t[len_proc];
+    processos = new pid_t[len_proc];
 
-    for(int i=0;i<len_proc;i++) {
-        processos[i] = fork();
-    }
+    spawn(len_proc);
 
-    for(int i=0;i<len_proc;i++) {
-        if(processos[i]==0)
-            programa();
-        // else if(processos[i]>0) parent
-        cout << "PID: " << processos[i] << endl;
-    }
+    programa();
+        
     cout << "acabei" << endl;
 }
