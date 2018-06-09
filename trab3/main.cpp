@@ -3,11 +3,26 @@
 #include <cstdlib>
 #include <ctime>
 #include <unistd.h>
+#include "lamport.h"
+#include <fstream> 
+#include <queue>
 
 using namespace std;
 
 pid_t *processos;
 int id;
+
+
+struct log {
+    int relogio;
+    string frase;
+    bool operator<(const log& b) const
+    {
+        return relogio < b.relogio;
+    }   
+};      
+
+
 bool spawn(int n) { // cria n processos recursivamente.
     if(n) {
         if(fork()==0) {
@@ -38,9 +53,31 @@ string gerar_frase(){
     return frases[rand() % len];
 }
 
+void write_text_to_log_file( const std::string &text )
+{
+    std::ofstream log_file(
+        "log_file_" + std::to_string(id) + ".txt", std::ios_base::out | std::ios_base::app );
+    log_file << text << endl;
+}
+
 int programa() {
+    //Init lamport individual
+    LamportClock* lc = new LamportClock();
+    
+
+    //Estrutura de dados individual:  adaptar para callbacks de recebimento e envio de mensagens do Totally Ordered Multicast
+    std::priority_queue<log>* q = new priority_queue<log>();
+    //if(id == 3) q->push(log{1, "alow" });
+
+    
     srand(time(NULL) + id);
     cout << "ID: " << id << " " << gerar_frase()<<endl;
+
+    //log individual - Se fila nao estiver vazia, printar
+    if(!q->empty()) {
+        write_text_to_log_file(q->top().frase);
+        q->pop();
+    }
     return 1;
 }
 
@@ -57,6 +94,9 @@ int main(int argc, char *argv[]) {
     spawn(len_proc);
 
     programa();
+
+    
         
     cout << "acabei" << endl;
 }
+
