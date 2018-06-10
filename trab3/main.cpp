@@ -26,7 +26,6 @@ struct client_properties {
     struct sockaddr_in address;
     int sock = 0, valread;
     struct sockaddr_in serv_addr;
-    char *hello = "Hello from client";
     char buffer[1025] = {0};
 };
 
@@ -44,7 +43,7 @@ int master_socket , addrlen , new_socket , *client_socket , max_clients, activit
 int max_sd;
 struct sockaddr_in address;  
 char read_buffer[1025], write_buffer[1025];  //data buffer of 1K
-fd_set readfds;
+fd_set serverfds, clientfds, exceptfds;
 
 struct client_properties *clientes;
 // fim das variaveis de socket
@@ -92,10 +91,86 @@ int geracao_local() {
     string f = to_string(id) + " Local - " + gerar_frase(); // gerei um evento
     geral_frases.push_back(f);
     // envia eventos pra todos
+    // 1. envia para todos os clientes
+    for(i=0;i<len_proc-id;i++)
+        send(clientes[i].sock, f.c_str(), strlen(f.c_str()), 0);
 }
 
 int geracao_remota() {
     // recebe a frase;
+    while(true) {
+        FD_ZERO(&serverfds);
+        FD_ZERO(&clientfds);
+        max_sd=master_socket;
+        FD_SET(master_socket, &serverfds);
+        for(i=0;i<max_clients;i++) {
+            sd = client_socket[i];
+            if(sd>0)
+                FD_SET(sd, &serverfds);
+            
+            if(sd > max_sd)
+                max_sd = sd;
+
+        }
+
+        activity = select(max_sd+1, &serverfds, &clientfds, &exceptfds,NULL);
+        if(activity<0)
+            cout << "erro no select" << endl;
+        
+        // se algo aconteceu ao master socket, entao é uma nova conexão que deve ser tratada.
+        if (FD_ISSET(master_socket, &serverfds)) {
+            if ((new_socket = accept(master_socket, (struct sockaddr *)&address, (socklen_t*)&addrlen))<0)
+            {
+                perror("accept");
+                exit(EXIT_FAILURE);
+            }
+            //printf("ID: %d - New connection , socket fd is %d , ip is : %s , port : %d \n" , id, new_socket , inet_ntoa(address.sin_addr) , ntohs(address.sin_port));
+
+
+            //adiciona no array de sockets
+            for (i = 0; i < max_clients; i++) 
+            {
+                //procura a primeira posicao vazia no array
+                if( client_socket[i] == 0 )
+                {
+                    client_socket[i] = new_socket;
+                    //printf("Adicionanado na posicao %d\n" , i);
+                    break;
+                }
+            }
+        }
+
+        // se nao, é uma operacao de IO no socket!
+
+        for (i = 0; i < max_clients; i++) 
+        {
+            sd = client_socket[i];
+              
+            if (FD_ISSET( sd , &serverfds)) 
+            {
+                //Verifica se é alguem fechando a conexao
+                if ((valread = read( sd , read_buffer, 1024)) == 0)
+                {
+                    //Pega os dados de quem desconectou e printa
+                    getpeername(sd , (struct sockaddr*)&address , (socklen_t*)&addrlen);
+                    printf("Host desconectado , ip %s , port %d \n" , inet_ntoa(address.sin_addr) , ntohs(address.sin_port));
+                      
+                    //Close the socket and mark as 0 in list for reuse
+                    close( sd );
+                    client_socket[i] = 0;
+                }
+                  
+                //Se nao for, ja temos o valor lido no nosso buffer
+                else
+                {
+                    //Adiciona o caracter de terminacao de string;
+                    read_buffer[valread] = '\0';
+                    cout << "ID " << id << " recebeu: " << read_buffer << endl;
+                }
+            }
+        }
+    }
+    //processa e adiciona nafila local
     string f = to_string(id) + " Remota - Frase recebida";
     geral_frases.push_back(f);
 }
@@ -146,9 +221,9 @@ int programa() {
 
     // 7. Agora vamos configurar os clients.
     clientes = new client_properties[len_proc-id];
-    int port_iterator=id;
+    int port_iterator=id+1;
+    cout << "Id: " << id << " _ " << len_proc - id << endl; // debug
     for(int i=0;i<len_proc-id;i++) {
-        port_iterator--;
         if ((clientes[i].sock = socket(AF_INET, SOCK_STREAM, 0)) < 0)
         {
             cout << "\n Socket creation error \n";
@@ -166,15 +241,15 @@ int programa() {
             cout << "\nInvalid address/ Address not supported \n";
             return -1;
         }
-    
+        cout <<"ID: " << id << " Porta: " << BASE_PORT+port_iterator << endl;
         if (connect(clientes[i].sock, (struct sockaddr *)&clientes[i].serv_addr, sizeof(clientes[i].serv_addr)) < 0)
         {
-            cout << "\nConnection Failed \n";
+            cout << "\n"<< id <<" - Connection Failed \n";
             return -1;
         }
-        cout << "conectado!" << endl << endl;
+        port_iterator++;
     }
-
+    cout << "Id: " << id << " conectado geral!" << endl;
     geracoes[0] = thread(geracao_local);
     geracoes[1] = thread(geracao_remota);
     
