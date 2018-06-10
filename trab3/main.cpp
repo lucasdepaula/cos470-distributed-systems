@@ -88,22 +88,32 @@ string gerar_frase(){
 }
 
 int geracao_local() {
-    string f = to_string(id) + " Local - " + gerar_frase(); // gerei um evento
-    geral_frases.push_back(f);
-    // envia eventos pra todos
-    // 1. envia para todos os clientes
-    for(i=0;i<len_proc-id;i++)
-        send(clientes[i].sock, f.c_str(), strlen(f.c_str()), 0);
+    //while(true) {
+        string f = to_string(id) + " Local - " + gerar_frase(); // gerei um evento
+        geral_frases.push_back(f);
+        // envia eventos pra todos
+        // 1. envia para todos os clientes
+        for(i=0;i<len_proc-id;i++)
+            send(clientes[i].sock, f.c_str(), strlen(f.c_str()), 0);
+        // 2. Envia para todos os servidores
+        for (i=0;i<max_clients;i++) {
+            if(client_socket[i]>0) {
+                send(client_socket[i], f.c_str(), strlen(f.c_str()),0);
+            }
+        }
+    //}
 }
 
 int geracao_remota() {
     // recebe a frase;
+    //if(id==0) { cout << "ID ZERO" << endl;}
     while(true) {
+        
         FD_ZERO(&serverfds);
         FD_ZERO(&clientfds);
         max_sd=master_socket;
         FD_SET(master_socket, &serverfds);
-        for(i=0;i<max_clients;i++) {
+        for(int i=0;i<max_clients;i++) {
             sd = client_socket[i];
             if(sd>0)
                 FD_SET(sd, &serverfds);
@@ -111,6 +121,13 @@ int geracao_remota() {
             if(sd > max_sd)
                 max_sd = sd;
 
+        }
+        for(int i=0;i<len_proc-id;i++) {
+            sd = clientes[i].sock;
+            if(sd >0)
+                FD_SET(sd, &clientfds);
+            if(sd>max_sd)
+                max_sd=sd;
         }
 
         activity = select(max_sd+1, &serverfds, &clientfds, &exceptfds,NULL);
@@ -141,12 +158,24 @@ int geracao_remota() {
         }
 
         // se nao, é uma operacao de IO no socket!
-
-        for (i = 0; i < max_clients; i++) 
+        int tmp=0;
+        char *buf;
+        for (i = 0; i < max_clients+(len_proc-id); i++) 
         {
-            sd = client_socket[i];
+            
+            if(i>=max_clients) {
+                tmp = i;
+                i-=max_clients;
+                sd=clientes[i].sock;
+                buf = clientes[i].buffer;
+            }
+            else {
+                sd = client_socket[i];
+                buf = read_buffer;
+            }
+            
               
-            if (FD_ISSET( sd , &serverfds)) 
+            if (FD_ISSET( sd , &serverfds) || FD_ISSET(sd, &clientfds)) 
             {
                 //Verifica se é alguem fechando a conexao
                 if ((valread = read( sd , read_buffer, 1024)) == 0)
@@ -167,6 +196,11 @@ int geracao_remota() {
                     read_buffer[valread] = '\0';
                     cout << "ID " << id << " recebeu: " << read_buffer << endl;
                 }
+            }
+
+            if(tmp>0) {
+                i=tmp;
+                tmp=0;
             }
         }
     }
@@ -222,7 +256,7 @@ int programa() {
     // 7. Agora vamos configurar os clients.
     clientes = new client_properties[len_proc-id];
     int port_iterator=id+1;
-    cout << "Id: " << id << " _ " << len_proc - id << endl; // debug
+    //cout << "Id: " << id << " _ " << len_proc - id << endl; // debug
     for(int i=0;i<len_proc-id;i++) {
         if ((clientes[i].sock = socket(AF_INET, SOCK_STREAM, 0)) < 0)
         {
@@ -241,7 +275,7 @@ int programa() {
             cout << "\nInvalid address/ Address not supported \n";
             return -1;
         }
-        cout <<"ID: " << id << " Porta: " << BASE_PORT+port_iterator << endl;
+        //cout <<"ID: " << id << " Porta: " << BASE_PORT+port_iterator << endl;
         if (connect(clientes[i].sock, (struct sockaddr *)&clientes[i].serv_addr, sizeof(clientes[i].serv_addr)) < 0)
         {
             cout << "\n"<< id <<" - Connection Failed \n";
