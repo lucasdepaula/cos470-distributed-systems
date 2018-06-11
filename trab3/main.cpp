@@ -67,6 +67,13 @@ bool spawn(int n) { // cria n processos recursivamente.
     }
 }
 
+void write_text_to_log_file( const std::string &text )
+{
+    std::ofstream log_file(
+        "log_file_" + std::to_string(id) + ".txt", std::ios_base::out | std::ios_base::app );
+    log_file << text << endl;
+}
+
 bool carregar_tabela(string path) {
     ifstream file (path);
     string valor;
@@ -95,11 +102,12 @@ string gerar_frase(){
 int geracao_local() {
     // while(true) {
         int i;
-        string f = to_string(id) + " Local - " + gerar_frase(); // gerei um evento
+        string f = to_string(id) + " " + gerar_frase(); // gerei um evento
         //cout << f << endl;
         geral_frases.push_back(f);
         // envia eventos pra todos
         // 1. envia para todos os clientes
+        write_text_to_log_file(f);
         for(i=0;i<len_proc-id;i++)
             //cout << "CLIENTES: enviado de " << id << " para " << clientes[i].sock << endl;
             send(clientes[i].sock, f.c_str(), strlen(f.c_str()), 0);
@@ -189,6 +197,7 @@ int geracao_remota_cliente(client_properties * sock){
                     //Adiciona o caracter de terminacao de string;
                     buf[valread] = '\0';
                     //cout << "ID " << id << " recebeu: " << buf << endl;
+                    write_text_to_log_file(buf);
                     count_msg->fetch_add(1);
                     cout << count_msg->load() << endl;
                 }
@@ -233,6 +242,7 @@ int geracao_remota_servidor(int sock, fd_set * serverfds){
                     // cout << "Read Inner 2 - " << id <<  " - "  << sock  << endl; 
                     //Adiciona o caracter de terminacao de string;
                     read_buffer[valread] = '\0';
+                    write_text_to_log_file(read_buffer);
                     //cout << "ID " << id << " recebeu: " << read_buffer << endl;
                     count_msg->fetch_add(1);
                     cout << count_msg->load() << endl;
