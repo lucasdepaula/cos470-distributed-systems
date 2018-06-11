@@ -10,6 +10,8 @@
 #include <vector>
 #include <atomic>
 #include <sys/mman.h>
+#include <sys/time.h>
+#include <fcntl.h>
 // comunicacao via socket
 #include<sys/socket.h>
 #include <netinet/in.h>
@@ -31,12 +33,13 @@ struct client_properties {
     char buffer[1025] = {0};
 };
 
+atomic<int>* count_msg;
 atomic<int>* count_accepted;
 atomic<int>* count_ready;
 atomic<int>* count_server;
 int len_proc;
 struct process *procs;
-thread* geracoes[2];
+thread* geracoes;
 vector<string> geral_frases;
 
 
@@ -44,7 +47,7 @@ vector<string> geral_frases;
 int opt = true;
 int master_socket, addrlen,  *client_socket , max_clients;
 struct sockaddr_in address;  
-char read_buffer[1025], write_buffer[1025];  //data buffer of 1K
+char *read_buffer, *write_buffer;  //data buffer of 1K
 fd_set* serverfds, *clientfds, *exceptfds;
 
 struct client_properties *clientes;
@@ -110,6 +113,15 @@ int geracao_local() {
     // }
 }
 
+bool SetSocketNotBlocking(int fd)
+{
+    if (fd<0) return false;
+    int flags = fcntl(fd,F_GETFL,0);
+    if (flags == -1) return false;
+    flags = (flags & ~O_NONBLOCK);
+    return (fcntl(fd, F_SETFL, flags) == 0) ? true : false;
+}
+
 int preparar_sockets() {
      // 2. Criamos o socket master do servidor
     if( (master_socket = socket(AF_INET , SOCK_STREAM , 0)) == 0) 
@@ -144,6 +156,124 @@ int preparar_sockets() {
     
     //cout << "Processo " << to_string(id) << " com socket configurado e escutando na porta " << to_string(address.sin_port) << endl;
     return 1;
+}
+int geracao_remota_cliente(client_properties * sock){
+    try {
+        addrlen = sizeof(address);
+        clientfds = new fd_set;
+        FD_ZERO(clientfds);
+        
+        int sd = sock->sock;
+        char *buf = sock->buffer;
+        while (true){
+            int i;
+            FD_SET(sock->sock, clientfds);
+            if (FD_ISSET(sd, clientfds)) 
+            {
+                //Verifica se é alguem fechando a conexao
+                int valread;
+                // cout << "Read - " << id <<  " - "  << sd  << endl; 
+                if ((valread = read( sd , buf, 1024)) == 0)
+                {
+                    //cout << "Read Inner 1 - " << id <<  " - "  << sd  << endl; 
+                    //Pega os dados de quem desconectou e printa
+                    getpeername(sd , (struct sockaddr*)&address , (socklen_t*)&addrlen);
+                    printf("Host desconectado , ip %s , port %d \n" , inet_ntoa(address.sin_addr) , ntohs(address.sin_port));
+                    
+                    //Close the socket and mark as 0 in list for reuse
+                    close( sd );
+                }
+                //Se nao for, ja temos o valor lido no nosso buffer
+                else
+                {
+                    //Adiciona o caracter de terminacao de string;
+                    buf[valread] = '\0';
+                    //cout << "ID " << id << " recebeu: " << buf << endl;
+                    count_msg->fetch_add(1);
+                    cout << count_msg->load() << endl;
+                }
+                //cout << "Fim read - " << id <<  " - "  << sd  << endl;
+            }
+        
+        }
+    } catch (const std::exception& e) {
+        cout << e.what() << endl;
+    }
+    
+}
+
+int geracao_remota_servidor(int sock, fd_set * serverfds){
+    try {
+        int addrlen = sizeof(address);
+        char * read_buffer = new char[1025];
+        while(true){
+            // se nao, é uma operacao de IO no socket!
+            int i;
+            FD_SET(sock, serverfds);
+            //cout << id << "  " << sock << "  " << serverfds << " " << FD_ISSET(sock, serverfds) << endl;
+            if (FD_ISSET(sock, serverfds)) {
+                //Verifica se é alguem fechando a conexao
+                int valread;
+                // cout << "Read - " << id <<  " - "  << sock  << endl; 
+                if ((valread = read(sock , read_buffer, 1024)) == 0)
+                {
+                    // cout << "Read Inner 1 - " << id <<  " - "  << sock  << endl; 
+                    //Pega os dados de quem desconectou e printa
+                    getpeername(sock , (struct sockaddr*)&address , (socklen_t*)&addrlen);
+                    //printf("Host desconectado , ip %s , port %d \n" , inet_ntoa(address.sin_addr) , ntohs(address.sin_port));
+                    
+                    //Close the socket and mark as 0 in list for reuse
+                    close(sock );
+                    client_socket[i] = 0;
+                }
+                
+                //Se nao for, ja temos o valor lido no nosso buffer
+                else
+                {
+                    // cout << "Read Inner 2 - " << id <<  " - "  << sock  << endl; 
+                    //Adiciona o caracter de terminacao de string;
+                    read_buffer[valread] = '\0';
+                    //cout << "ID " << id << " recebeu: " << read_buffer << endl;
+                    count_msg->fetch_add(1);
+                    cout << count_msg->load() << endl;
+
+                }
+                // << "Fim read - " << id <<  " - "  << sock  << endl;
+            }
+        }
+    } catch (const std::exception& e) {
+        cout << e.what() << endl;
+    }
+    
+}
+
+int aceitar_conexoes(fd_set* serverfds){
+    FD_SET(master_socket, serverfds);
+    while(true){
+        if (FD_ISSET(master_socket, serverfds)) {
+            int new_socket;
+            if ((new_socket = accept(master_socket, (struct sockaddr *)&address, (socklen_t*)&addrlen))<0)
+            {
+                perror("accept");
+                exit(EXIT_FAILURE);
+            }       
+            count_accepted->fetch_add(1);
+            //printf("ID: %d - New connection , socket fd is %d , ip is : %s , port : %d \n" , id, new_socket , inet_ntoa(address.sin_addr) , ntohs(address.sin_port));
+            //adiciona no array de sockets
+            int i;
+            for (i = 0; i < max_clients; i++) 
+            {
+                //procura a primeira posicao vazia no array
+                if( client_socket[i] == 0 )
+                {   
+                    client_socket[i] = new_socket;
+                    //printf("Adicionanado na posicao %d\n" , i);
+                    break;
+                }
+            }
+        }
+    }
+    
 }
 
 int geracao_remota() {
@@ -180,10 +310,18 @@ int geracao_remota() {
                 max_sd=sd;
         }
         int activity;
-        activity = select(max_sd+1, serverfds, clientfds, exceptfds,NULL);
+        //cout << id <<  " - " << max_sd+1  <<  endl;
+        struct timeval timeout;
+        timeout.tv_sec = 1;
+        timeout.tv_usec = 0;
+        cout << "Activity - " << id <<  " - "  << sd  << endl; 
+        activity = select(max_sd+1, serverfds, clientfds, exceptfds, &timeout);
         if(activity<0)
             cout << "erro no select" << endl;
-        
+        cout << id << "Activity retornou " << activity << endl; 
+
+        //if (activity == 0) continue;
+
         // se algo aconteceu ao master socket, entao é uma nova conexão que deve ser tratada.
         if (FD_ISSET(master_socket, serverfds)) {
             int new_socket;
@@ -191,7 +329,8 @@ int geracao_remota() {
             {
                 perror("accept");
                 exit(EXIT_FAILURE);
-            }
+            }       
+            
             count_accepted->fetch_add(1);
             //printf("ID: %d - New connection , socket fd is %d , ip is : %s , port : %d \n" , id, new_socket , inet_ntoa(address.sin_addr) , ntohs(address.sin_port));
             
@@ -232,8 +371,10 @@ int geracao_remota() {
                 {
                     //Verifica se é alguem fechando a conexao
                     int valread;
-                    if ((valread = read( sd , read_buffer, 1024)) == 0)
+                    cout << "Read - " << id <<  " - "  << sd  << endl; 
+                    if ((valread = read( sd , buf, 1024)) == 0)
                     {
+                        cout << "Read Inner 1 - " << id <<  " - "  << sd  << endl; 
                         //Pega os dados de quem desconectou e printa
                         getpeername(sd , (struct sockaddr*)&address , (socklen_t*)&addrlen);
                         printf("Host desconectado , ip %s , port %d \n" , inet_ntoa(address.sin_addr) , ntohs(address.sin_port));
@@ -251,6 +392,7 @@ int geracao_remota() {
                         cout << "ID " << id << " recebeu: " << read_buffer << endl;
 
                     }
+                    cout << "Fim read - " << id <<  " - "  << sd  << endl;
                 }
 
                 if(tmp>0) {
@@ -327,13 +469,15 @@ int main(int argc, char *argv[]) {
     id=len_proc;
     processos = new pid_t[len_proc];
     procs = new struct process[len_proc];
+    geracoes = new thread[len_proc+2]; //len_proc de escuta + thread de envio + thread de acietar conexao
     //carregar_tabela("tabela.csv");  
 
     //memória compatilhada para armazenar variavies de controle de sockets
     count_accepted = static_cast<atomic<int>*>(mmap(0, sizeof *count_accepted, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
     count_ready = static_cast<atomic<int>*>(mmap(0, sizeof *count_ready, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
     count_server = static_cast<atomic<int>*>(mmap(0, sizeof *count_server, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
-    
+    count_msg = static_cast<atomic<int>*>(mmap(0, sizeof *count_msg, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
+
     spawn(len_proc);
 
     // 1. Instanciamos e inicializamos o vetor de clients
@@ -357,20 +501,43 @@ int main(int argc, char *argv[]) {
         std::this_thread::yield();
     }
     
-    
-    //o processo irá escutar a porta do socket e processar os dados e novas conexões
-    geracoes[1] = new thread(geracao_remota);    
+    fd_set* serverfds = new fd_set;
+    FD_ZERO(serverfds);
+    geracoes[1] = thread(aceitar_conexoes, serverfds);    
     while (static_cast<int>(count_accepted->load()) != ((double)len_proc + 1)*((double)len_proc/2)) {
         std::this_thread::yield();
     }
+    //o processo irá escutar a porta do socket e processar os dados e novas conexões
+    //escutar servidores - client_socket
+    int countGeracoes = 0;
+    for (int i = 0 ; i < len_proc ; i ++){
+        if (client_socket[i] > 0){
+            int sock = client_socket[i];
+            //cout << " Servidor para id " << id << ": " << i << " com socket " << sock <<endl;
+            geracoes[2+countGeracoes] = thread(geracao_remota_servidor, sock, serverfds);  
+            countGeracoes++;
+        }
+    }   
+    //escutar clientes - client
+
+    for(int i=0;i<len_proc-id;i++) {
+        client_properties * sock = &clientes[i];
+        //cout << " Cliente para id " << id << ": " << i << " com socket " << sock->sock <<endl;
+        geracoes[2+countGeracoes] = thread(geracao_remota_cliente, sock);  
+        countGeracoes++;
+    }  
+
 
     //cout << id << " Client socket: " << convert(client_socket) << endl;
 
     //agora que todos estão conectados e ouvindo as devidas portas, gerar mensagens
-    geracoes[0] = new thread(geracao_local);
+    geracoes[0] = thread(geracao_local);
     
-    geracoes[0]->join();
-    geracoes[1]->join();
+    geracoes[0].join();
+    for (int i = 1; i < len_proc + 2 ; i++){
+        geracoes[i].join();
+    }
+    geracoes[1].join();
     for(int i = 0; i < geral_frases.size(); i++) {
         // cout << geral_frases[i] << endl;
     }
