@@ -14,22 +14,9 @@ public:
         return time_.fetch_add(1);
     }
 
-    LamportTime receive_event(LamportTime received_time) {
-        RECEIVE_EVENT:
-
+    void receive_event(LamportTime received_time) {
         auto cur = get_time();
-
-        // If received time is old, do nothing.
-        if (received_time < cur) {
-            return cur;
-        }
-
-        // Ensure that local timer is at least one ahead.
-        if (!time_.compare_exchange_strong(cur, received_time + 1)) {
-            goto RECEIVE_EVENT;
-        }
-
-        return received_time + 1;
+        time_.store(std::max(cur, received_time) + 1);
     }
 
 private:

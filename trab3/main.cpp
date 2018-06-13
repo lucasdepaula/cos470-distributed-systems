@@ -16,6 +16,8 @@
 #include "lamport.h"
 #include <queue>
 #include <semaphore.h>
+#include <unistd.h>
+#include <signal.h>
 // comunicacao via socket
 #include<sys/socket.h>
 #include <netinet/in.h>
@@ -50,6 +52,7 @@ struct process *procs;
 thread* geracoes;
 vector<string> geral_frases;
 pthread_mutex_t mutex;
+pthread_mutex_t mfila;
 
 // variaveis do socket
 int opt = true;
@@ -67,11 +70,14 @@ struct msg {
     int processId;
     int isEvent;
     string toString(){
-        return frase + "//"+to_string(relogio)+"//"+to_string(processId)+"//"+to_string(isEvent);
+        return frase + "//"+to_string(relogio)+"//"+to_string(processId)+"//"+to_string(isEvent)+"//";
+    }
+    string toLog(){
+        return "Relogio: " + to_string(relogio) + "; Processo: " + to_string(processId) + "; Frase: " +  frase;
     }
     bool operator<(const msg& b) const
     {
-        return relogio == b.relogio ?  processId < b.processId : relogio < b.relogio;
+        return relogio == b.relogio ?  processId > b.processId : relogio > b.relogio;
     } 
 };
 // fim das variaveis de socket
@@ -136,6 +142,7 @@ void multicast(msg m) {
             send(client_socket[i], (m.toString()).c_str(), strlen((m.toString()).c_str()),0);
         }
     }
+    //cout << "ENVIADO "<< qtd_local << "/" << qtd_msg << " - " << m.toString() << endl;
     pthread_mutex_unlock(&mutex);
 }
 
@@ -150,72 +157,97 @@ int envio_ack() {
     }
 }
 
-int geracao_local() {
-     while(qtd_local<qtd_msg) {
+void add_to_heap (msg m ){
+    pthread_mutex_lock(&mfila);
+    fila->push(m);
+    pthread_mutex_unlock(&mfila);
+}
+
+void handler (int sig){
+    if (qtd_local<qtd_msg){
         string f = gerar_frase(); // gerei um evento
-        //cout << f << endl;
-        geral_frases.push_back(f);
         // envia eventos pra todos
         // 1. envia para todos os clientes
         lc->send_event();
         msg m =  msg {f,lc->get_time(), id, true};
         multicast(m);
+        add_to_heap(m);
         qtd_local++;
-     }
+        //cout << "freq " << to_string(freq) << endl;
+    }
 }
 
-msg recebermsg(char * c) {
+int geracao_local() {
+    cout << "freq " << to_string(freq) << endl;
+    signal(SIGALRM, handler);
+    ualarm(freq,freq);
+}
+
+vector<msg> recebermsg(char * c) {
     //metodo completamente especifico para nosso tipo de mensagem
-    string a;
-    unsigned int b;
-    int i;
-    int id;
-    int isEvent;
-    for (i = 0 ;  i < 1025; i ++ ){
-        if( (string (1,c[i])).compare(string (1,'/')) == 0) {
-            if( (string (1,c[1+i])).compare(string (1,'/')) == 0) break;
-        }
-        a+=c[i];
-    }
     
-    i+=2;
-    string temp;
-    while (i < 1025)
-    {
-        if( (string (1,c[i])).compare(string (1,'/')) == 0) {
-            if( (string (1,c[1+i])).compare(string (1,'/')) == 0) break;
+
+    vector<msg> msg_ret;
+    int i = 0;
+    int count = 0;
+    while (i < 1025) {
+        string a;
+        unsigned int b;
+        int id;
+        int isEvent;
+        while (true){
+            if( (string (1,c[i])).compare(string (1,'/')) == 0) {
+                if( (string (1,c[1+i])).compare(string (1,'/')) == 0) break;
+            }
+            a+=c[i];
+            i++;
         }
-        temp+=c[i];
-        i++;
-    }
-    b = stoi(temp);
-    i+=2;
-    temp = "";
-    while (i < 1025)
-    {
-        if( (string (1,c[i])).compare(string (1,'/')) == 0) {
-            if( (string (1,c[1+i])).compare(string (1,'/')) == 0) break;
+        
+        i+=2;
+        string temp;
+        while (true)
+        {
+            if( (string (1,c[i])).compare(string (1,'/')) == 0) {
+                if( (string (1,c[1+i])).compare(string (1,'/')) == 0) break;
+            }
+            temp+=c[i];
+            i++;
         }
-        temp+=c[i];
-        i++;
-    }
-    i+=2;
-    id = stoi(temp);
-    temp = "";
-    while (i < 1025)
-    {
-        if( (string (1,c[i])).compare(string (1,'/')) == 0) {
-            if( (string (1,c[1+i])).compare(string (1,'/')) == 0) break;
+        b = stoi(temp);
+        i+=2;
+        temp = "";
+        while (true)
+        {
+            if( (string (1,c[i])).compare(string (1,'/')) == 0) {
+                if( (string (1,c[1+i])).compare(string (1,'/')) == 0) break;
+            }
+            temp+=c[i];
+            i++;
         }
-        temp+=c[i];
-        i++;
-    }
-    isEvent = stoi(temp);
-    return msg {a, b, id, isEvent};
+        i+=2;
+        id = stoi(temp);
+        temp = "";
+        while (true)
+        {
+            if( (string (1,c[i])).compare(string (1,'/')) == 0) {
+                if( (string (1,c[1+i])).compare(string (1,'/')) == 0) break;
+            }
+            temp+=c[i];
+            i++;
+        }
+        isEvent = stoi(temp);
+
+        
+        msg_ret.push_back(msg{a, b, id, isEvent});
+        
+        i+=2;
+        if((string (1,c[i])).compare(string (1,'\0')) == 0) break;
+
+    }    
+    
+    return msg_ret;
 }
-void add_to_heap (msg m ){
-    fila->push(m);
-}
+
 
 void ack_all_processes(msg m) {
     m.isEvent = 0;
@@ -224,14 +256,19 @@ void ack_all_processes(msg m) {
     multicast(m);
 }
 void processarMsg(char * buf)  {
-    msg m = recebermsg(buf);
-    lc->receive_event(m.relogio);
-    count_msg->fetch_add(1);
-    if (m.isEvent == 1) {
-        add_to_heap(m);
-        ack_all_processes(m);
-    } 
-    m.relogio = lc->get_time();
+    vector<msg> m = recebermsg(buf);
+    for (int i = 0; i < m.size(); i ++){
+        lc->receive_event(m[i].relogio);
+        if (m[i].isEvent == 1) {
+            count_msg->fetch_add(1);
+            //cout << " Adicionado a fila: " << m[i].toString() << endl;
+            add_to_heap(m[i]);
+            //ack_all_processes(m);
+        } 
+    }
+
+    //cout << " Msg recebida: " << m.toString() << endl;
+
     //cout << "ID " << id << " recebeu: " << m.toString() << endl;
 }
 
@@ -239,7 +276,7 @@ void executar_log() {
 
     while(!fila->empty()){
         msg m = fila->top();
-        write_text_to_log_file(m.toString());
+        write_text_to_log_file(m.toLog());
         fila->pop();
     }
 
@@ -247,11 +284,14 @@ void executar_log() {
 }
 int verifica_fim(){
     while (true) {
-        cout<<count_msg->load()<<endl;
-        if(count_msg->load() == 2*qtd_msg*(len_proc+1)*len_proc) {
+        cout << "Progress: " <<count_msg->load() << "/"  << qtd_msg*(len_proc+1)*len_proc <<  endl; 
+        if(count_msg->load() == qtd_msg*(len_proc+1)*len_proc) {
             executar_log();
             break;
+        } else {
+            std::this_thread::yield();
         }
+        usleep(1000000);
     }
 }
 
@@ -297,7 +337,8 @@ int geracao_remota_cliente(client_properties * sock){
         FD_ZERO(clientfds);
         
         int sd = sock->sock;
-        char *buf = sock->buffer;
+        //char *buf = sock->buffer;
+        char * read_buffer = new char [1025];
         while (true){
             int i;
             FD_SET(sock->sock, clientfds);
@@ -306,7 +347,7 @@ int geracao_remota_cliente(client_properties * sock){
                 //Verifica se é alguem fechando a conexao
                 int valread;
                 // cout << "Read - " << id <<  " - "  << sd  << endl; 
-                if ((valread = read( sd , buf, 1024)) == 0)
+                if ((valread = read( sd , read_buffer, 1024)) == 0)
                 {
                     //cout << "Read Inner 1 - " << id <<  " - "  << sd  << endl; 
                     //Pega os dados de quem desconectou e printa
@@ -315,16 +356,17 @@ int geracao_remota_cliente(client_properties * sock){
                     
                     //Close the socket and mark as 0 in list for reuse
                     close( sd );
+                    break;
                 }
                 //Se nao for, ja temos o valor lido no nosso buffer
                 else
                 {
                     //Adiciona o caracter de terminacao de string;
-                    buf[valread] = '\0';
-                    processarMsg(buf);
-                    
+                    read_buffer[valread] = '\0';
                     //count_msg->fetch_add(1);
                     //cout << count_msg->load() << endl;
+                    //cout << id  << read_buffer << "\n\n" << endl;
+                    processarMsg(read_buffer);
                 }
                 //cout << "Fim read - " << id <<  " - "  << sd  << endl;
             }
@@ -359,6 +401,7 @@ int geracao_remota_servidor(int sock, fd_set * serverfds){
                     //Close the socket and mark as 0 in list for reuse
                     close(sock );
                     client_socket[i] = 0;
+                    break;
                 }
                 
                 //Se nao for, ja temos o valor lido no nosso buffer
@@ -367,6 +410,10 @@ int geracao_remota_servidor(int sock, fd_set * serverfds){
                     // cout << "Read Inner 2 - " << id <<  " - "  << sock  << endl; 
                     //Adiciona o caracter de terminacao de string;
                     read_buffer[valread] = '\0';
+                    //cout << id << read_buffer << "\n\n" << endl;
+                    //count_msg->fetch_add(1);
+                    //cout << count_msg->load() << endl;
+                    
                     processarMsg(read_buffer);
                     
                     //count_msg->fetch_add(1);
@@ -469,7 +516,7 @@ int main(int argc, char *argv[]) {
     
     len_proc = atoi(argv[1]);
     qtd_msg = atoi(argv[2]);
-    freq = atoi(argv[3]);
+    freq = 1000000/(atoi(argv[3]));
     id=len_proc;
     processos = new pid_t[len_proc];
     procs = new struct process[len_proc];
@@ -489,6 +536,7 @@ int main(int argc, char *argv[]) {
 
     //mutex de uso do socker para envio (2 threads utilizam)
     mutex = PTHREAD_MUTEX_INITIALIZER;
+    mfila = PTHREAD_MUTEX_INITIALIZER;
     //inicializar lamport e fila
     lc = new LamportClock();
     fila = new priority_queue<msg>();
@@ -555,11 +603,10 @@ int main(int argc, char *argv[]) {
     //agora que todos estão conectados e ouvindo as devidas portas, gerar mensagens
     geracoes[0] = thread(geracao_local);    
    
-    usleep(5000000);
-    cout<<"lol"<<endl;
-    executar_log();
-    // verifica_fim();
-    // for (int i = 0; i < len_proc + 4 ; i++){
+    // usleep(5000000);
+    // executar_log();
+    verifica_fim();
+    // for (int i = 0; i < len_proc + 3 ; i++){
     //     geracoes[i].join();
     // }
     
