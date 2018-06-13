@@ -18,11 +18,13 @@
 #include <semaphore.h>
 #include <unistd.h>
 #include <signal.h>
+#include <map>
+#include <sstream>
 // comunicacao via socket
 #include<sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#define BASE_PORT 3000
+//#define BASE_PORT 3000
 using namespace std;
 
 
@@ -37,7 +39,20 @@ struct client_properties {
     int sock = 0, valread;
     struct sockaddr_in serv_addr;
     char buffer[1025] = {0};
+    string ip;
+    int porta;
 };
+
+
+struct tabela {
+    string ip;
+    int port;
+    string toString() {
+        return ip + " - " + to_string(port);
+    }
+};
+
+std::map<int, tabela> enderecos;
 int qtd_local;
 LamportClock* lc;
 atomic<int>* count_msg;
@@ -108,8 +123,27 @@ void write_text_to_log_file( const std::string &text )
 bool carregar_tabela(string path) {
     ifstream file (path);
     string valor;
-    while(file.good()){
-        getline(file, valor, ',');
+    string line;
+
+    while(getline(file, line)){
+        std::istringstream s (line);
+        string pid, ip, port;
+        string field;
+        int i = 0;
+        while(getline(s, field, ',')){
+            if (i == 0) {
+                pid = field; i++; continue;
+            }
+            if (i == 1) {
+                ip = field; i++; continue;
+            } 
+            if (i == 2){
+                port = field; i=0;
+            } 
+            
+        }
+        tabela t = tabela{ip, stoi(port)};
+        enderecos.insert(std::make_pair(stoi(pid), t));
     }
 }
 
@@ -163,7 +197,15 @@ void add_to_heap (msg m ){
     pthread_mutex_unlock(&mfila);
 }
 
+void send_alarm () {
+    if (freq >= 1000000) {
+        alarm(freq/1000000);
+    } else {
+        ualarm(freq,freq);
+    }
+}
 void handler (int sig){
+    //cout << " inside handler " << endl;
     if (qtd_local<qtd_msg){
         string f = gerar_frase(); // gerei um evento
         // envia eventos pra todos
@@ -173,14 +215,15 @@ void handler (int sig){
         multicast(m);
         add_to_heap(m);
         qtd_local++;
+        send_alarm();
         //cout << "freq " << to_string(freq) << endl;
     }
 }
 
 int geracao_local() {
-    cout << "freq " << to_string(freq) << endl;
+    //cout << "freq " << to_string(freq) << endl;
     signal(SIGALRM, handler);
-    ualarm(freq,freq);
+    send_alarm();
 }
 
 vector<msg> recebermsg(char * c) {
@@ -312,7 +355,8 @@ int preparar_sockets() {
     // 4. Configuracoes do endereco (e.g. Porta, familia, e enderecos)    
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;   
-    address.sin_port = htons( BASE_PORT+id ); // detalhe: ele comeca a escutar na porta base+id
+    //cout << " Come'cando a escutar: " << id << " - " << enderecos[id].port << endl;
+    address.sin_port = htons( enderecos[id].port ); // detalhe: ele comeca a escutar na porta base+id
 
     // 5. Fazemos o bind do endereco no socket
     if (bind(master_socket, (struct sockaddr *)&address, sizeof(address))<0) 
@@ -458,10 +502,17 @@ int aceitar_conexoes(fd_set* serverfds){
     
 }
 
+string carregar_ip(int pid){
+    return enderecos[pid].ip;
+}
+
+int carregar_porta(int pid){
+    return enderecos[pid].port;
+}
+
 int conectar_clientes(){
     // 7. Agora vamos configurar os clients.
     clientes = new client_properties[len_proc-id];
-    int port_iterator=id+1;
     //cout << "Id: " << id << " _ " << len_proc - id << endl; // debug
     for(int i=0;i<len_proc-id;i++) {
         if ((clientes[i].sock = socket(AF_INET, SOCK_STREAM, 0)) < 0)
@@ -470,13 +521,17 @@ int conectar_clientes(){
             return -1;
         }
         
+
+        //cout << " Conectando a " << id+i+1 << " pela porta " << carregar_porta(id+i+1) << endl;
+        clientes[i].ip = carregar_ip(id+i+1);
+        clientes[i].porta = carregar_porta(id+i+1);
         memset(&clientes[i].serv_addr, '0', sizeof(clientes[i].serv_addr));
     
         clientes[i].serv_addr.sin_family = AF_INET;
-        clientes[i].serv_addr.sin_port = htons(BASE_PORT + port_iterator);
+        clientes[i].serv_addr.sin_port = htons(clientes[i].porta);
         
         // Convert IPv4 and IPv6 addresses from text to binary form
-        if(inet_pton(AF_INET, "127.0.0.1", &clientes[i].serv_addr.sin_addr)<=0) 
+        if(inet_pton(AF_INET, clientes[i].ip.c_str(), &clientes[i].serv_addr.sin_addr)<=0) 
         {
             cout << "\nInvalid address/ Address not supported \n";
             return -1;
@@ -487,7 +542,6 @@ int conectar_clientes(){
             cout << "\n"<< id <<" - Connection Failed \n";
             return -1;
         }
-        port_iterator++;
     }
     return 1;
 }
@@ -514,14 +568,14 @@ int main(int argc, char *argv[]) {
         return 0;
     }
     
-    len_proc = atoi(argv[1]);
+    len_proc = atoi(argv[1]) - 1;
     qtd_msg = atoi(argv[2]);
     freq = 1000000/(atoi(argv[3]));
     id=len_proc;
     processos = new pid_t[len_proc];
     procs = new struct process[len_proc];
     geracoes = new thread[len_proc+3]; //len_proc de escuta + thread de envio + thread de acietar conexao + envio de ack
-    //carregar_tabela("tabela.csv"); 
+    carregar_tabela("tabela.csv"); 
 
     //memória compatilhada para armazenar variavies de controle de sockets
     count_accepted = static_cast<atomic<int>*>(mmap(0, sizeof *count_accepted, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
