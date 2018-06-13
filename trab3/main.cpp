@@ -12,6 +12,10 @@
 #include <sys/mman.h>
 #include <sys/time.h>
 #include <fcntl.h>
+#include <string>
+#include "lamport.h"
+#include <queue>
+#include <semaphore.h>
 // comunicacao via socket
 #include<sys/socket.h>
 #include <netinet/in.h>
@@ -32,16 +36,20 @@ struct client_properties {
     struct sockaddr_in serv_addr;
     char buffer[1025] = {0};
 };
-
+int qtd_local;
+LamportClock* lc;
 atomic<int>* count_msg;
+atomic<int>* count_ack;
 atomic<int>* count_accepted;
 atomic<int>* count_ready;
 atomic<int>* count_server;
 int len_proc;
+int qtd_msg;
+int freq;
 struct process *procs;
 thread* geracoes;
 vector<string> geral_frases;
-
+pthread_mutex_t mutex;
 
 // variaveis do socket
 int opt = true;
@@ -50,8 +58,25 @@ struct sockaddr_in address;
 char *read_buffer, *write_buffer;  //data buffer of 1K
 fd_set* serverfds, *clientfds, *exceptfds;
 
+
+
 struct client_properties *clientes;
+struct msg {
+    string frase;
+    unsigned int relogio;
+    int processId;
+    int isEvent;
+    string toString(){
+        return frase + "//"+to_string(relogio)+"//"+to_string(processId)+"//"+to_string(isEvent);
+    }
+    bool operator<(const msg& b) const
+    {
+        return relogio == b.relogio ?  processId < b.processId : relogio < b.relogio;
+    } 
+};
 // fim das variaveis de socket
+std::priority_queue<msg>* fila;
+std::queue<msg>* ack;
 pid_t *processos;
 int id;
 bool spawn(int n) { // cria n processos recursivamente.
@@ -99,35 +124,135 @@ string gerar_frase(){
     return frases[rand() % len];
 }
 
+void multicast(msg m) {
+    //regiao critica! 2 threads acessando aqui (geracao local e envio ack)
+    pthread_mutex_lock(&mutex);
+    int i;
+    for(i=0;i<len_proc-id;i++)
+        send(clientes[i].sock, (m.toString()).c_str(), strlen((m.toString()).c_str()), 0);
+    // 2. Envia para todos os servidores
+    for (i=0;i<max_clients;i++) {
+        if(client_socket[i]>0) {
+            send(client_socket[i], (m.toString()).c_str(), strlen((m.toString()).c_str()),0);
+        }
+    }
+    pthread_mutex_unlock(&mutex);
+}
+
+int envio_ack() {
+    while(true){
+        if(ack->empty()){
+            std::this_thread::yield();
+        } else {
+            multicast(ack->front());
+            ack->pop();
+        }
+    }
+}
+
 int geracao_local() {
-    // while(true) {
-        int i;
-        string f = to_string(id) + " " + gerar_frase(); // gerei um evento
+     while(qtd_local<qtd_msg) {
+        string f = gerar_frase(); // gerei um evento
         //cout << f << endl;
         geral_frases.push_back(f);
         // envia eventos pra todos
         // 1. envia para todos os clientes
-        write_text_to_log_file(f);
-        for(i=0;i<len_proc-id;i++)
-            //cout << "CLIENTES: enviado de " << id << " para " << clientes[i].sock << endl;
-            send(clientes[i].sock, f.c_str(), strlen(f.c_str()), 0);
-        // 2. Envia para todos os servidores
-        for (i=0;i<max_clients;i++) {
-            if(client_socket[i]>0) {
-                //cout << "SERVIDORES: enviado de " << id << " para " << client_socket[i] << endl;
-                send(client_socket[i], f.c_str(), strlen(f.c_str()),0);
-            }
-        }
-    // }
+        lc->send_event();
+        msg m =  msg {f,lc->get_time(), id, true};
+        multicast(m);
+        qtd_local++;
+     }
 }
 
-bool SetSocketNotBlocking(int fd)
-{
-    if (fd<0) return false;
-    int flags = fcntl(fd,F_GETFL,0);
-    if (flags == -1) return false;
-    flags = (flags & ~O_NONBLOCK);
-    return (fcntl(fd, F_SETFL, flags) == 0) ? true : false;
+msg recebermsg(char * c) {
+    //metodo completamente especifico para nosso tipo de mensagem
+    string a;
+    unsigned int b;
+    int i;
+    int id;
+    int isEvent;
+    for (i = 0 ;  i < 1025; i ++ ){
+        if( (string (1,c[i])).compare(string (1,'/')) == 0) {
+            if( (string (1,c[1+i])).compare(string (1,'/')) == 0) break;
+        }
+        a+=c[i];
+    }
+    
+    i+=2;
+    string temp;
+    while (i < 1025)
+    {
+        if( (string (1,c[i])).compare(string (1,'/')) == 0) {
+            if( (string (1,c[1+i])).compare(string (1,'/')) == 0) break;
+        }
+        temp+=c[i];
+        i++;
+    }
+    b = stoi(temp);
+    i+=2;
+    temp = "";
+    while (i < 1025)
+    {
+        if( (string (1,c[i])).compare(string (1,'/')) == 0) {
+            if( (string (1,c[1+i])).compare(string (1,'/')) == 0) break;
+        }
+        temp+=c[i];
+        i++;
+    }
+    i+=2;
+    id = stoi(temp);
+    temp = "";
+    while (i < 1025)
+    {
+        if( (string (1,c[i])).compare(string (1,'/')) == 0) {
+            if( (string (1,c[1+i])).compare(string (1,'/')) == 0) break;
+        }
+        temp+=c[i];
+        i++;
+    }
+    isEvent = stoi(temp);
+    return msg {a, b, id, isEvent};
+}
+void add_to_heap (msg m ){
+    fila->push(m);
+}
+
+void ack_all_processes(msg m) {
+    m.isEvent = 0;
+    m.relogio = lc->get_time();
+    m.processId = id;
+    multicast(m);
+}
+void processarMsg(char * buf)  {
+    msg m = recebermsg(buf);
+    lc->receive_event(m.relogio);
+    count_msg->fetch_add(1);
+    if (m.isEvent == 1) {
+        add_to_heap(m);
+        ack_all_processes(m);
+    } 
+    m.relogio = lc->get_time();
+    //cout << "ID " << id << " recebeu: " << m.toString() << endl;
+}
+
+void executar_log() {
+
+    while(!fila->empty()){
+        msg m = fila->top();
+        write_text_to_log_file(m.toString());
+        fila->pop();
+    }
+
+    
+}
+int verifica_fim(){
+    while (true) {
+        cout<<count_msg->load()<<endl;
+        if(count_msg->load() == 2*qtd_msg*(len_proc+1)*len_proc) {
+            executar_log();
+            break;
+        }
+    }
 }
 
 int preparar_sockets() {
@@ -196,10 +321,10 @@ int geracao_remota_cliente(client_properties * sock){
                 {
                     //Adiciona o caracter de terminacao de string;
                     buf[valread] = '\0';
-                    //cout << "ID " << id << " recebeu: " << buf << endl;
-                    write_text_to_log_file(buf);
-                    count_msg->fetch_add(1);
-                    cout << count_msg->load() << endl;
+                    processarMsg(buf);
+                    
+                    //count_msg->fetch_add(1);
+                    //cout << count_msg->load() << endl;
                 }
                 //cout << "Fim read - " << id <<  " - "  << sd  << endl;
             }
@@ -242,10 +367,10 @@ int geracao_remota_servidor(int sock, fd_set * serverfds){
                     // cout << "Read Inner 2 - " << id <<  " - "  << sock  << endl; 
                     //Adiciona o caracter de terminacao de string;
                     read_buffer[valread] = '\0';
-                    write_text_to_log_file(read_buffer);
-                    //cout << "ID " << id << " recebeu: " << read_buffer << endl;
-                    count_msg->fetch_add(1);
-                    cout << count_msg->load() << endl;
+                    processarMsg(read_buffer);
+                    
+                    //count_msg->fetch_add(1);
+                    //cout << count_msg->load() << endl;
 
                 }
                 // << "Fim read - " << id <<  " - "  << sock  << endl;
@@ -285,141 +410,6 @@ int aceitar_conexoes(fd_set* serverfds){
     }
     
 }
-
-int geracao_remota() {
-
-    // recebe a frase;
-    //if(id==0) { cout << "ID ZERO" << endl;}
-    
-    //cout << id << " GERACAO REMOTA " << count_ready->load()  << endl;
-    addrlen = sizeof(address);
-    serverfds = new fd_set;
-    clientfds = new fd_set;
-    exceptfds = new fd_set;
-    while(true) {        
-        int max_sd;
-        FD_ZERO(serverfds);
-        FD_ZERO(clientfds);
-        max_sd=master_socket;
-        FD_SET(master_socket, serverfds);
-        int sd;
-        for(int i=0;i<max_clients;i++) {
-            sd = client_socket[i];
-            if(sd>0)
-                FD_SET(sd, serverfds);
-            
-            if(sd > max_sd)
-                max_sd = sd;
-
-        }
-        for(int i=0;i<len_proc-id;i++) {
-            sd = clientes[i].sock;
-            if(sd >0)
-                FD_SET(sd, clientfds);
-            if(sd>max_sd)
-                max_sd=sd;
-        }
-        int activity;
-        //cout << id <<  " - " << max_sd+1  <<  endl;
-        struct timeval timeout;
-        timeout.tv_sec = 1;
-        timeout.tv_usec = 0;
-        cout << "Activity - " << id <<  " - "  << sd  << endl; 
-        activity = select(max_sd+1, serverfds, clientfds, exceptfds, &timeout);
-        if(activity<0)
-            cout << "erro no select" << endl;
-        cout << id << "Activity retornou " << activity << endl; 
-
-        //if (activity == 0) continue;
-
-        // se algo aconteceu ao master socket, entao é uma nova conexão que deve ser tratada.
-        if (FD_ISSET(master_socket, serverfds)) {
-            int new_socket;
-            if ((new_socket = accept(master_socket, (struct sockaddr *)&address, (socklen_t*)&addrlen))<0)
-            {
-                perror("accept");
-                exit(EXIT_FAILURE);
-            }       
-            
-            count_accepted->fetch_add(1);
-            //printf("ID: %d - New connection , socket fd is %d , ip is : %s , port : %d \n" , id, new_socket , inet_ntoa(address.sin_addr) , ntohs(address.sin_port));
-            
-            //adiciona no array de sockets
-            int i;
-            for (i = 0; i < max_clients; i++) 
-            {
-                //procura a primeira posicao vazia no array
-                if( client_socket[i] == 0 )
-                {   
-                    client_socket[i] = new_socket;
-                    //printf("Adicionanado na posicao %d\n" , i);
-                    break;
-                }
-            }
-        } else {
-            
-            // se nao, é uma operacao de IO no socket!
-            int tmp=0;
-            char *buf;
-            int i;
-            for (i = 0; i < max_clients+(len_proc-id); i++) 
-            {
-                
-                if(i>=max_clients) {
-                    tmp = i;
-                    i-=max_clients;
-                    sd=clientes[i].sock;
-                    buf = clientes[i].buffer;
-                }
-                else {
-                    sd = client_socket[i];
-                    buf = read_buffer;
-                }
-                
-                
-                if (FD_ISSET( sd , serverfds) || FD_ISSET(sd, clientfds)) 
-                {
-                    //Verifica se é alguem fechando a conexao
-                    int valread;
-                    cout << "Read - " << id <<  " - "  << sd  << endl; 
-                    if ((valread = read( sd , buf, 1024)) == 0)
-                    {
-                        cout << "Read Inner 1 - " << id <<  " - "  << sd  << endl; 
-                        //Pega os dados de quem desconectou e printa
-                        getpeername(sd , (struct sockaddr*)&address , (socklen_t*)&addrlen);
-                        printf("Host desconectado , ip %s , port %d \n" , inet_ntoa(address.sin_addr) , ntohs(address.sin_port));
-                        
-                        //Close the socket and mark as 0 in list for reuse
-                        close( sd );
-                        client_socket[i] = 0;
-                    }
-                    
-                    //Se nao for, ja temos o valor lido no nosso buffer
-                    else
-                    {
-                        //Adiciona o caracter de terminacao de string;
-                        read_buffer[valread] = '\0';
-                        cout << "ID " << id << " recebeu: " << read_buffer << endl;
-
-                    }
-                    cout << "Fim read - " << id <<  " - "  << sd  << endl;
-                }
-
-                if(tmp>0) {
-                    i=tmp;
-                    tmp=0;
-                }
-            }
-        }
-        
-    }
-    //processa e adiciona nafila local
-    string f = to_string(id) + " Remota - Frase recebida";
-    geral_frases.push_back(f);
-    
-}
-
-
 
 int conectar_clientes(){
     // 7. Agora vamos configurar os clients.
@@ -469,18 +459,22 @@ string convert (int b[]){
 
 
 int main(int argc, char *argv[]) {
-    //gerar processos
-    if(argc<2) {
-        cout << "Informe o número de processos que serão criados!" << endl;
+    //
+
+
+    if(argc<3) {
+        cout << "Informe os parametros corretos!" << endl;
         return 0;
     }
     
     len_proc = atoi(argv[1]);
+    qtd_msg = atoi(argv[2]);
+    freq = atoi(argv[3]);
     id=len_proc;
     processos = new pid_t[len_proc];
     procs = new struct process[len_proc];
-    geracoes = new thread[len_proc+2]; //len_proc de escuta + thread de envio + thread de acietar conexao
-    //carregar_tabela("tabela.csv");  
+    geracoes = new thread[len_proc+3]; //len_proc de escuta + thread de envio + thread de acietar conexao + envio de ack
+    //carregar_tabela("tabela.csv"); 
 
     //memória compatilhada para armazenar variavies de controle de sockets
     count_accepted = static_cast<atomic<int>*>(mmap(0, sizeof *count_accepted, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
@@ -489,6 +483,19 @@ int main(int argc, char *argv[]) {
     count_msg = static_cast<atomic<int>*>(mmap(0, sizeof *count_msg, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
 
     spawn(len_proc);
+
+
+
+
+    //mutex de uso do socker para envio (2 threads utilizam)
+    mutex = PTHREAD_MUTEX_INITIALIZER;
+    //inicializar lamport e fila
+    lc = new LamportClock();
+    fila = new priority_queue<msg>();
+    ack = new queue<msg>();
+
+    qtd_local = 0;
+
 
     // 1. Instanciamos e inicializamos o vetor de clients
     srand(time(NULL) + id);
@@ -524,7 +531,7 @@ int main(int argc, char *argv[]) {
         if (client_socket[i] > 0){
             int sock = client_socket[i];
             //cout << " Servidor para id " << id << ": " << i << " com socket " << sock <<endl;
-            geracoes[2+countGeracoes] = thread(geracao_remota_servidor, sock, serverfds);  
+            geracoes[3+countGeracoes] = thread(geracao_remota_servidor, sock, serverfds);  
             countGeracoes++;
         }
     }   
@@ -533,22 +540,27 @@ int main(int argc, char *argv[]) {
     for(int i=0;i<len_proc-id;i++) {
         client_properties * sock = &clientes[i];
         //cout << " Cliente para id " << id << ": " << i << " com socket " << sock->sock <<endl;
-        geracoes[2+countGeracoes] = thread(geracao_remota_cliente, sock);  
+        geracoes[3+countGeracoes] = thread(geracao_remota_cliente, sock);  
         countGeracoes++;
     }  
+
+    //prepara thread de envio de ack
+    geracoes[2] = thread(envio_ack);   
+
+    //prepara thread que verifica o fim de execucao ( todas mensagens enviadas e seus respecitvos ACK)
 
 
     //cout << id << " Client socket: " << convert(client_socket) << endl;
 
     //agora que todos estão conectados e ouvindo as devidas portas, gerar mensagens
-    geracoes[0] = thread(geracao_local);
+    geracoes[0] = thread(geracao_local);    
+   
+    usleep(5000000);
+    cout<<"lol"<<endl;
+    executar_log();
+    // verifica_fim();
+    // for (int i = 0; i < len_proc + 4 ; i++){
+    //     geracoes[i].join();
+    // }
     
-    geracoes[0].join();
-    for (int i = 1; i < len_proc + 2 ; i++){
-        geracoes[i].join();
-    }
-    geracoes[1].join();
-    for(int i = 0; i < geral_frases.size(); i++) {
-        // cout << geral_frases[i] << endl;
-    }
 }
