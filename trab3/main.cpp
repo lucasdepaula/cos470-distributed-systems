@@ -38,7 +38,6 @@ struct client_properties {
     struct sockaddr_in address;
     int sock = 0, valread;
     struct sockaddr_in serv_addr;
-    char buffer[1025] = {0};
     string ip;
     int porta;
 };
@@ -68,12 +67,13 @@ thread* geracoes;
 vector<string> geral_frases;
 pthread_mutex_t mutex;
 pthread_mutex_t mfila;
+pthread_mutex_t mack;
 
 // variaveis do socket
 int opt = true;
 int master_socket, addrlen,  *client_socket , max_clients;
 struct sockaddr_in address;  
-char *read_buffer, *write_buffer;  //data buffer of 1K
+char *read_buffer, *write_buffer;  //data buffer of 4K
 fd_set* serverfds, *clientfds, *exceptfds;
 
 
@@ -233,7 +233,7 @@ vector<msg> recebermsg(char * c) {
     vector<msg> msg_ret;
     int i = 0;
     int count = 0;
-    while (i < 1025) {
+    while (i < 4096) {
         string a;
         unsigned int b;
         int id;
@@ -279,7 +279,7 @@ vector<msg> recebermsg(char * c) {
             i++;
         }
         isEvent = stoi(temp);
-
+        //cout << temp << to_string(stoi(temp)) << endl; 
         
         msg_ret.push_back(msg{a, b, id, isEvent});
         
@@ -292,11 +292,11 @@ vector<msg> recebermsg(char * c) {
 }
 
 
-void ack_all_processes(msg m) {
-    m.isEvent = 0;
-    m.relogio = lc->get_time();
-    m.processId = id;
-    multicast(m);
+void ack_all_processes() {
+    pthread_mutex_lock(&mack);
+    lc->send_event();
+    ack->push(msg{"ack", lc->get_time(), id, 0});
+    pthread_mutex_unlock(&mack);
 }
 void processarMsg(char * buf)  {
     vector<msg> m = recebermsg(buf);
@@ -306,7 +306,7 @@ void processarMsg(char * buf)  {
             count_msg->fetch_add(1);
             //cout << " Adicionado a fila: " << m[i].toString() << endl;
             add_to_heap(m[i]);
-            //ack_all_processes(m);
+            ack_all_processes();
         } 
     }
 
@@ -328,7 +328,7 @@ void executar_log() {
 int verifica_fim(){
     while (true) {
         cout << "Progress: " <<count_msg->load() << "/"  << qtd_msg*(len_proc+1)*len_proc <<  endl; 
-        if(count_msg->load() == qtd_msg*(len_proc+1)*len_proc) {
+        if(count_msg->load() >= qtd_msg*(len_proc+1)*len_proc) {
             executar_log();
             break;
         } else {
@@ -382,7 +382,7 @@ int geracao_remota_cliente(client_properties * sock){
         
         int sd = sock->sock;
         //char *buf = sock->buffer;
-        char * read_buffer = new char [1025];
+        char * read_buffer = new char [4096];
         while (true){
             int i;
             FD_SET(sock->sock, clientfds);
@@ -391,7 +391,7 @@ int geracao_remota_cliente(client_properties * sock){
                 //Verifica se é alguem fechando a conexao
                 int valread;
                 // cout << "Read - " << id <<  " - "  << sd  << endl; 
-                if ((valread = read( sd , read_buffer, 1024)) == 0)
+                if ((valread = read( sd , read_buffer, 4096)) == 0)
                 {
                     //cout << "Read Inner 1 - " << id <<  " - "  << sd  << endl; 
                     //Pega os dados de quem desconectou e printa
@@ -425,7 +425,7 @@ int geracao_remota_cliente(client_properties * sock){
 int geracao_remota_servidor(int sock, fd_set * serverfds){
     try {
         int addrlen = sizeof(address);
-        char * read_buffer = new char[1025];
+        char * read_buffer = new char[4096];
         while(true){
             // se nao, é uma operacao de IO no socket!
             int i;
@@ -435,7 +435,7 @@ int geracao_remota_servidor(int sock, fd_set * serverfds){
                 //Verifica se é alguem fechando a conexao
                 int valread;
                 // cout << "Read - " << id <<  " - "  << sock  << endl; 
-                if ((valread = read(sock , read_buffer, 1024)) == 0)
+                if ((valread = read(sock , read_buffer, 4096)) == 0)
                 {
                     // cout << "Read Inner 1 - " << id <<  " - "  << sock  << endl; 
                     //Pega os dados de quem desconectou e printa
@@ -591,6 +591,8 @@ int main(int argc, char *argv[]) {
     //mutex de uso do socker para envio (2 threads utilizam)
     mutex = PTHREAD_MUTEX_INITIALIZER;
     mfila = PTHREAD_MUTEX_INITIALIZER;
+    mack = PTHREAD_MUTEX_INITIALIZER;
+    
     //inicializar lamport e fila
     lc = new LamportClock();
     fila = new priority_queue<msg>();
